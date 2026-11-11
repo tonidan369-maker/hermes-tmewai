@@ -46,7 +46,7 @@ Manual path: copy `tmewai/` into `$HERMES_HOME/plugins/tmewai`, add `tmewai` to
 ```
 tmewai/            the plugin (plugin.yaml, __init__.py, importer.py, coverage.py,
                    gate.py, folds.py, schema.sql, SKILL.md, README.md)
-tests/             stdlib unittest suite (54 tests, no network)
+tests/             stdlib unittest suite (61 tests, no network)
 scripts/           ingest_archive.py — the real handlers, no mocks
 reference/         demo export + fixture generator
 Makefile           make test | make demo | make big
@@ -61,6 +61,12 @@ Makefile           make test | make demo | make big
   `source_files` row with a status and a content-free reason code.
 - **Imports are idempotent.** Content fingerprint match gives `status: reused`
   and zero rows.
+- **A person keeps one identity across imports.** Names are the only identity a
+  Facebook export offers, so `(platform, display_name)` is unique and an older
+  database with duplicate rows is merged on open.
+- **Arabic search folds the shapes that actually differ.** Harakat, hamza and
+  taa-marbuta variants, Arabic-Indic digits (`٢٠٢٠` matches `2020`) and the
+  presentation forms that PDF/Office pastes carry (`ﻻ` matches `لا`).
 - **Evidence is bounded in three dimensions** — events, characters and bytes —
   and the consent row cannot carry excerpt text.
 - **No network.** A test greps the module sources for `socket`, `urllib`,
