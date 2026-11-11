@@ -1282,9 +1282,40 @@ def render_schema() -> str:
     return pattern.sub(lambda match: sql_fold_expression(match.group(1)), sql)
 
 
+def _merge_duplicate_people(conn: sqlite3.Connection) -> None:
+    """Collapse person rows that share a name, keeping the oldest id.
+
+    Older databases predate the ``people_identity`` unique index, so they can
+    hold one row per import for the same person. Events are repointed before the
+    extra rows go, otherwise their actor_id would be orphaned.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'people'"
+    ).fetchone()
+    if exists is None:
+        return
+    duplicates = conn.execute(
+        "SELECT platform, display_name, MIN(id) AS keep FROM people "
+        "GROUP BY platform, display_name HAVING COUNT(*) > 1"
+    ).fetchall()
+    for platform, display_name, keep in duplicates:
+        conn.execute(
+            "UPDATE events SET actor_id = ? WHERE actor_id IN ("
+            "  SELECT id FROM people WHERE platform = ? AND display_name = ? AND id <> ?)",
+            (keep, platform, display_name, keep),
+        )
+        conn.execute(
+            "DELETE FROM people WHERE platform = ? AND display_name = ? AND id <> ?",
+            (platform, display_name, keep),
+        )
+    if duplicates:
+        conn.commit()
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """Create tables/triggers, rebuilding the index if fold SQL drifted."""
     conn.execute("PRAGMA foreign_keys = ON")
+    _merge_duplicate_people(conn)
     conn.executescript(render_schema())
     expected_insert = _trigger_sql("events_search_after_insert")
     row = conn.execute(
@@ -1471,6 +1502,15 @@ def ingest(conn: sqlite3.Connection, path: str | Path, platform: str = "facebook
                 continue
             name = name.strip()
             if name in people_ids:
+                continue
+            existing_person = conn.execute(
+                "SELECT id FROM people WHERE platform = ? AND display_name = ?",
+                (platform, name),
+            ).fetchone()
+            if existing_person is not None:
+                # Same person seen by an earlier import: reuse the row so both
+                # imports' events hang off one identity.
+                people_ids[name] = existing_person[0]
                 continue
             people_ids[name] = conn.execute(
                 "INSERT INTO people (platform, platform_person_id, display_name) "

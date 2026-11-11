@@ -475,6 +475,97 @@ class ImportAndSearchTests(unittest.TestCase):
         )
 
 
+class PersonIdentityTests(unittest.TestCase):
+    """A second archive must not fork the people table.
+
+    Facebook exports carry no person id, so the display name is the identity.
+    Before people_identity existed, each import inserted its own row per name and
+    every event of the newer import was invisible to archive_person.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Path(self.tmp.name) / "archive.db"
+        self.conn = sqlite3.connect(self.db)
+        self.conn.row_factory = sqlite3.Row
+        importer.ensure_schema(self.conn)
+        self.addCleanup(self.conn.close)
+
+    def _zip(self, name: str, extra: str) -> Path:
+        entries = synthetic_entries()
+        entries.append((f"{THREAD}/message_2.json",
+                        person_thread("ليلى", [{"sender_name": "Hadi Test",
+                                                "timestamp_ms": 1_700_000_500_000,
+                                                "content": extra}])))
+        return make_zip(self.tmp.name, entries, name=name)
+
+    def test_second_import_reuses_person_rows(self):
+        first = importer.ingest(self.conn, self._zip("a.zip", "from A"))
+        second = importer.ingest(self.conn, self._zip("b.zip", "from B"))
+        self.assertEqual(first["status"], "imported")
+        self.assertEqual(second["status"], "imported")
+        self.assertEqual(second["inserted"]["people"], 0)
+
+        duplicates = self.conn.execute(
+            "SELECT display_name, COUNT(*) AS n FROM people "
+            "GROUP BY platform, display_name HAVING n > 1").fetchall()
+        self.assertEqual(duplicates, [])
+
+    def test_both_imports_hang_off_one_person_row(self):
+        importer.ingest(self.conn, self._zip("a.zip", "from A"))
+        importer.ingest(self.conn, self._zip("b.zip", "from B"))
+        rows = self.conn.execute(
+            "SELECT COUNT(DISTINCT actor_id) AS ids FROM events "
+            "WHERE actor_id IS NOT NULL").fetchone()
+        named = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM people").fetchone()
+        self.assertEqual(rows["ids"], named["n"])
+
+        person = self.conn.execute(
+            "SELECT id FROM people WHERE display_name = 'Hadi Test'").fetchall()
+        self.assertEqual(len(person), 1)
+        events = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE actor_id = ?",
+            (person[0]["id"],)).fetchone()["n"]
+        self.assertGreaterEqual(events, 2)
+
+    def test_existing_duplicates_are_merged_on_open(self):
+        """Databases created before the index get repaired, not just blocked."""
+        self.conn.executescript("DROP INDEX IF EXISTS people_identity")
+        keep = self.conn.execute(
+            "INSERT INTO people (platform, platform_person_id, display_name) "
+            "VALUES ('facebook', NULL, 'ليلى')").lastrowid
+        other = self.conn.execute(
+            "INSERT INTO people (platform, platform_person_id, display_name) "
+            "VALUES ('facebook', NULL, 'ليلى')").lastrowid
+        import_id = self.conn.execute(
+            "INSERT INTO imports (platform, format, source_fingerprint, started_at, "
+            "importer_version, status) VALUES ('facebook', 'json', 'fp', '2024-01-01', "
+            "'1.0', 'completed')").lastrowid
+        source_file = self.conn.execute(
+            "INSERT INTO source_files (import_id, relative_path, parse_status) "
+            "VALUES (?, 'messages/inbox/ليلى_100/message_1.json', 'parsed')",
+            (import_id,)).lastrowid
+        for actor in (keep, other):
+            self.conn.execute(
+                "INSERT INTO events (import_id, source_file_id, source_locator, platform, "
+                "event_type, timestamp_normalized, timezone_status, actor_id) "
+                "VALUES (?, ?, ?, 'facebook', 'message', '2024-01-01', 'naive', ?)",
+                (import_id, source_file, f"legacy-{actor}", actor))
+        self.conn.commit()
+
+        importer.ensure_schema(self.conn)
+
+        left = self.conn.execute(
+            "SELECT id FROM people WHERE display_name = 'ليلى'").fetchall()
+        self.assertEqual(len(left), 1)
+        self.assertEqual(left[0]["id"], keep)
+        migrated = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE actor_id = ?", (keep,)).fetchone()["n"]
+        self.assertEqual(migrated, 2)
+
+
 class EvidenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

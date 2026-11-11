@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS people (
     UNIQUE(platform, platform_person_id)
 );
 
+-- A Facebook export carries no stable person id, so the folded display name IS
+-- the identity (DECISIONS.md). The UNIQUE above cannot enforce that because
+-- SQLite treats every NULL platform_person_id as distinct, which let a second
+-- import insert a second 'Layla' row and orphan the first one's events.
+CREATE UNIQUE INDEX IF NOT EXISTS people_identity ON people(platform, display_name);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     import_id              INTEGER NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
