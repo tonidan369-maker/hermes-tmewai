@@ -1174,6 +1174,49 @@ class EvidenceBoundaryTests(unittest.TestCase):
             "SELECT * FROM ai_consents ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
+
+    def test_oversized_event_does_not_empty_the_bundle(self):
+        """One huge message used to abort the whole bundle."""
+        huge = self.add("x" * 5000)
+        small = [self.add(f"short {index}") for index in range(5)]
+        bundle = gate.build_bundle(self.conn, [huge] + small, "p", "v", max_events=20,
+                                   max_total_chars=4000, max_total_bytes=16000)
+        self.assertEqual(bundle["event_count"], 5)
+        self.assertNotIn(huge, [item["id"] for item in bundle["excerpts"]])
+        self.assertLessEqual(bundle["char_count"], 4000)
+
+    def test_event_that_does_not_fit_is_skipped_not_fatal(self):
+        first = self.add("y" * 100)
+        blocker = self.add("z" * 4000)
+        tail = self.add("tail text")
+        bundle = gate.build_bundle(self.conn, [first, blocker, tail], "p", "v",
+                                   max_total_chars=4000, max_total_bytes=16000)
+        # The 4000-char event cannot join a bundle that already holds 100 chars,
+        # so the walk must continue to the short event after it.
+        ids = [item["id"] for item in bundle["excerpts"]]
+        self.assertIn(first, ids)
+        self.assertNotIn(blocker, ids)
+        self.assertIn(tail, ids)
+
+    def test_works_without_row_factory(self):
+        """A caller's plain sqlite3.connect() has no Row factory."""
+        plain = sqlite3.connect(":memory:")
+        self.addCleanup(plain.close)
+        plain.executescript(importer.render_schema())
+        plain.execute("INSERT INTO imports (id, platform, format, source_fingerprint, "
+                      "started_at, importer_version, status) "
+                      "VALUES (1, 'facebook', 'json', 'f', 'now', 'v', 'completed')")
+        plain.execute("INSERT INTO source_files (id, import_id, relative_path, "
+                      "parse_status) VALUES (1, 1, 'a.json', 'parsed')")
+        event_id = plain.execute(
+            "INSERT INTO events (import_id, source_file_id, source_locator, platform, "
+            "event_type, timezone_status, text_content) "
+            "VALUES (1, 1, 'a.json#/m/0', 'facebook', 'message', 'unknown', 'hello')",
+        ).lastrowid
+        bundle = gate.build_bundle(plain, [event_id], "p", "v")
+        self.assertEqual(bundle["event_count"], 1)
+        self.assertEqual(bundle["excerpts"][0]["id"], event_id)
+
     def test_whitespace_only_text_is_skipped(self):
         blank = self.add("  \n\t  ")
         real = self.add("real text")

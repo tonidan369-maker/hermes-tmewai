@@ -73,7 +73,7 @@ def build_bundle(
         if len(wanted) >= max_events:
             break
 
-    rows_by_id: dict[int, sqlite3.Row] = {}
+    rows_by_id: dict[int, dict[str, Any]] = {}
     if wanted:
         placeholders = ",".join("?" for _ in wanted)
         rows = conn.execute(
@@ -83,7 +83,12 @@ def build_bundle(
             f"WHERE e.id IN ({placeholders}) ORDER BY e.id ASC",
             wanted,
         ).fetchall()
-        rows_by_id = {row["id"]: row for row in rows}
+        # Name the columns explicitly: a caller's own connection may not set
+        # row_factory = sqlite3.Row (connect() does, a bare sqlite3.connect()
+        # does not), and then row["id"] raises TypeError.
+        columns = ("id", "text_content", "source_locator", "event_type",
+                   "timestamp_normalized", "person")
+        rows_by_id = {row[0]: dict(zip(columns, row)) for row in rows}
 
     selected: list[dict[str, Any]] = []
     excerpts: list[str] = []
@@ -101,14 +106,13 @@ def build_bundle(
         if not is_relative_locator(locator):
             continue
         text_bytes = len(text.encode("utf-8"))
-        if chars + len(text) > max_total_chars and excerpts:
-            break
-        if len(text) > max_total_chars and not excerpts:
-            break
-        if byte_count + text_bytes > max_total_bytes and excerpts:
-            break
-        if text_bytes > max_total_bytes and not excerpts:
-            break
+        # Skip what does not fit and keep walking: a single huge event used to
+        # abort the whole bundle (a 5000-char first message returned 0 events
+        # while five short ones would have fit).
+        if chars + len(text) > max_total_chars:
+            continue
+        if byte_count + text_bytes > max_total_bytes:
+            continue
         if len(selected) >= max_events:
             break
 
