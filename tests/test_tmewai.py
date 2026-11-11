@@ -21,6 +21,8 @@ if str(ROOT) not in sys.path:
 
 from tmewai import gate, importer  # noqa: E402
 from tmewai.folds import (  # noqa: E402
+    DIGIT_FOLDS,
+    PRESENTATION_FOLDS,
     SEARCH_TEXT_FOLDS,
     fold_text,
     match_query,
@@ -217,12 +219,78 @@ class FoldingTests(unittest.TestCase):
 
     def test_sql_expression_is_generated_from_same_table(self):
         expression = sql_fold_expression("new.text_content")
-        self.assertEqual(expression.count("replace("), len(SEARCH_TEXT_FOLDS))
+        self.assertEqual(
+            expression.count("replace("),
+            len(PRESENTATION_FOLDS) + len(SEARCH_TEXT_FOLDS) + len(DIGIT_FOLDS))
         self.assertIn("COALESCE(new.text_content, '')", expression)
         # The hamza-alef fold is present with the exact replacement character.
         self.assertIn("replace(", expression)
         self.assertIn("'\u0623'", expression)
         self.assertIn("'\u0627'", expression)
+
+    def test_digits_fold_so_ascii_queries_find_arabic_numerals(self):
+        self.assertEqual(fold_text("سنة ٢٠٢٠"), "سنه 2020")
+        self.assertEqual(fold_text("١٥٣"), "153")
+        self.assertEqual(fold_text("۱۴۰۰"), "1400")  # Persian digits
+
+    def test_presentation_forms_fold_to_plain_letters(self):
+        # Text pasted out of PDFs/Office uses contextual forms and the lam-alef
+        # ligature; both have to reach the same token as typed Arabic.
+        self.assertEqual(fold_text("ﻻ ﻳﻮﺟﺪ"), fold_text("لا يوجد"))
+        self.assertEqual(fold_text("ﻣﺮﺣﺒﺎ"), fold_text("مرحبا"))
+
+    def test_python_and_sql_folding_agree(self):
+        """The trigger expression and the query normalizer must never drift."""
+        samples = ["أَحْمَد إِبْرَاهِيم آدم", "مدرسة", "مـــرحبا", "ﻻ ﻳﻮﺟﺪ",
+                   "سنة ٢٠٢٠", "۱۴۰۰", "hello 123", "", "مصطفى"]
+        conn = sqlite3.connect(":memory:")
+        expression = sql_fold_expression("?")
+        for sample in samples:
+            sql_value = conn.execute(f"SELECT {expression}", (sample,)).fetchone()[0]
+            self.assertEqual(sql_value, fold_text(sample), sample)
+        conn.close()
+
+    def test_existing_index_is_rebuilt_when_fold_sql_changes(self):
+        """An archive imported before the fold table grew must not stay stale."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "old.db"
+        conn = sqlite3.connect(db)
+        self.addCleanup(conn.close)
+        conn.row_factory = sqlite3.Row
+        importer.ensure_schema(conn)
+
+        import_id = conn.execute(
+            "INSERT INTO imports (platform, format, source_fingerprint, started_at, "
+            "importer_version, status) VALUES ('facebook','json','fp','2026-01-01','1.0',"
+            "'completed')").lastrowid
+        source_file = conn.execute(
+            "INSERT INTO source_files (import_id, relative_path, parse_status) "
+            "VALUES (?, 'messages/inbox/a/message_1.json', 'parsed')",
+            (import_id,)).lastrowid
+        conn.execute(
+            "INSERT INTO events (import_id, source_file_id, source_locator, platform, "
+            "event_type, timestamp_normalized, timezone_status, text_content) "
+            "VALUES (?, ?, 'l1', 'facebook', 'message', '2020-01-01', 'naive', ?)",
+            (import_id, source_file, "سنة ٢٠٢٠ كانت صعبة"))
+        conn.commit()
+
+        # Pretend the row was indexed by the older, digit-blind fold chain.
+        conn.execute("DELETE FROM event_search")
+        conn.execute("INSERT INTO event_search (event_id, text_content, source_locator) "
+                     "VALUES (1, 'سنه ٢٠٢٠ كانت صعبه', 'l1')")
+        conn.execute("DROP TRIGGER IF EXISTS events_search_after_insert")
+        conn.execute(
+            "CREATE TRIGGER events_search_after_insert AFTER INSERT ON events BEGIN "
+            "INSERT INTO event_search (event_id, text_content, source_locator) "
+            "VALUES (new.id, COALESCE(new.text_content, ''), new.source_locator); END")
+        conn.commit()
+
+        importer.ensure_schema(conn)
+
+        hits = conn.execute("SELECT COUNT(*) AS n FROM event_search "
+                            "WHERE event_search MATCH ?", (match_query("2020"),)).fetchone()["n"]
+        self.assertEqual(hits, 1)
 
     def test_match_query_quotes_operators_and_folds(self):
         self.assertEqual(match_query("مرحبا"), '"مرحبا"')

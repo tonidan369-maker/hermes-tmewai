@@ -11,6 +11,7 @@ and to the query only.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # Ordered exactly as the Dart map declares them. Empty replacements remove the
 # codepoint; non-empty replacements fold it to the stated character.
@@ -46,20 +47,52 @@ SEARCH_TEXT_FOLDS: tuple[tuple[int, str], ...] = (
     (0x0640, ""),  # tatweel
 )
 
-_FOLD_MAP = {codepoint: replacement for codepoint, replacement in SEARCH_TEXT_FOLDS}
+# Eastern Arabic-Indic and Persian digits fold to ASCII so a query typed as
+# "2020" finds text written as "٢٠٢٠" (and the other way round). Arabic Facebook
+# posts mix the two freely, and unicode61 treats them as different tokens.
+DIGIT_FOLDS: tuple[tuple[int, str], ...] = tuple(
+    (0x0660 + offset, str(offset)) for offset in range(10)
+) + tuple((0x06F0 + offset, str(offset)) for offset in range(10))
+
+
+def _presentation_folds() -> tuple[tuple[int, str], ...]:
+    """Arabic Presentation Forms-B -> the letters they stand for.
+
+    Text pasted from PDFs, Office documents and older Arabic systems carries the
+    contextual forms (U+FE70..U+FEFC) instead of the plain block, so "لا يوجد"
+    never matched a stored "ﻻ ﻳﻮﺟﺪ". The canonical decomposition is stable Unicode
+    data, and deriving it here keeps the Python query normalizer and the SQL
+    trigger chain in lockstep because both consume this one table.
+    """
+    pairs = []
+    for codepoint in range(0xFE70, 0xFF00):
+        char = chr(codepoint)
+        decomposed = unicodedata.normalize("NFKC", char)
+        if decomposed and decomposed != char:
+            pairs.append((codepoint, decomposed))
+    return tuple(pairs)
+
+
+PRESENTATION_FOLDS: tuple[tuple[int, str], ...] = _presentation_folds()
+
+_FOLD_MAP = {codepoint: replacement for codepoint, replacement in SEARCH_TEXT_FOLDS + DIGIT_FOLDS}
+_PRESENTATION_MAP = {codepoint: replacement for codepoint, replacement in PRESENTATION_FOLDS}
 
 
 def fold_text(value: str | None) -> str:
     """Apply the fold table to ``value``, leaving every other rune untouched."""
     if not value:
         return ""
-    return "".join(_FOLD_MAP.get(ord(char), char) for char in value)
+    expanded = "".join(_PRESENTATION_MAP.get(ord(char), char) for char in value)
+    return "".join(_FOLD_MAP.get(ord(char), char) for char in expanded)
 
 
 def sql_fold_expression(column: str) -> str:
     """SQL expression applying exactly ``SEARCH_TEXT_FOLDS`` to ``column``."""
     expression = f"COALESCE({column}, '')"
-    for codepoint, replacement in SEARCH_TEXT_FOLDS:
+    # Presentation forms first: their expansion (e.g. the lam-alef ligature) still
+    # has to go through the letter folds below.
+    for codepoint, replacement in PRESENTATION_FOLDS + SEARCH_TEXT_FOLDS + DIGIT_FOLDS:
         source = _sql_literal(chr(codepoint))
         target = _sql_literal(replacement)
         expression = f"replace({expression}, {source}, {target})"
