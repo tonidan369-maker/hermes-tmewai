@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+*.db
+.DS_Store
+reference/lib/
+reference/docs/

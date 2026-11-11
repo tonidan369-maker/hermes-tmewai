@@ -1,0 +1,13 @@
+name: tmewai
+version: 1.0.0
+description: Local, offline index for your own Facebook JSON export. Scans and imports an archive into SQLite, searches messages/comments/reactions/posts with Arabic-aware folding, and builds a bounded, consented evidence bundle. No network, standard library only.
+author: Hadi Aljurdi
+license: MIT
+homepage: https://github.com/tonidan369-maker/hermes-tmewai
+provides_tools:
+  - archive_scan
+  - archive_ingest
+  - archive_search
+  - archive_person
+  - archive_overview
+  - archive_evidence
