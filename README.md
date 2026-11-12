@@ -31,6 +31,12 @@ text**.
 Peak RSS 54 MB on the large archive; DB 17.7 MB. Full breakdown in
 [`REPORT.md`](REPORT.md).
 
+## Demo
+
+A 23-second screen recording — ingest, folded search, evidence bundle — rendered
+from the real run, no mock-ups: [docs/demo.mp4](docs/demo.mp4) ·
+[release download](https://github.com/tonidan369-maker/hermes-tmewai/releases/download/v1.0.0/tmewai-demo.mp4)
+
 ## Install
 
 ```bash
